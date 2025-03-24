@@ -10,6 +10,7 @@ import { Disposable, toDisposable } from '../../../../../../../base/common/lifec
 import { autorun, autorunDelta, constObservable, derived, IObservable } from '../../../../../../../base/common/observable.js';
 import { editorBackground, scrollbarShadow } from '../../../../../../../platform/theme/common/colorRegistry.js';
 import { asCssVariable } from '../../../../../../../platform/theme/common/colorUtils.js';
+import { IThemeService } from '../../../../../../../platform/theme/common/themeService.js';
 import { IEditorMouseEvent, IViewZoneChangeAccessor } from '../../../../../../browser/editorBrowser.js';
 import { EditorMouseEvent } from '../../../../../../browser/editorDom.js';
 import { ObservableCodeEditor } from '../../../../../../browser/observableCodeEditor.js';
@@ -25,10 +26,9 @@ import { IModelDecorationOptions, TrackedRangeStickiness } from '../../../../../
 import { LineTokens } from '../../../../../../common/tokens/lineTokens.js';
 import { TokenArray } from '../../../../../../common/tokens/tokenArray.js';
 import { InlineDecoration, InlineDecorationType } from '../../../../../../common/viewModel.js';
-import { IInlineEditsView, IInlineEditsViewHost } from '../inlineEditsViewInterface.js';
-import { getModifiedBorderColor, modifiedChangedLineBackgroundColor } from '../theme.js';
+import { IInlineEditsView, InlineEditTabAction } from '../inlineEditsViewInterface.js';
+import { getEditorBlendedColor, getModifiedBorderColor, getOriginalBorderColor, modifiedChangedLineBackgroundColor, originalBackgroundColor } from '../theme.js';
 import { getPrefixTrim, mapOutFalsy, rectToProps } from '../utils/utils.js';
-import { rangesToBubbleRanges, Replacement } from './inlineEditsWordReplacementView.js';
 
 export class InlineEditsLineReplacementView extends Disposable implements IInlineEditsView {
 
@@ -82,7 +82,7 @@ export class InlineEditsLineReplacementView extends Disposable implements IInlin
 			}
 
 			// TODO: All lines should be rendered at once for one dom element
-			const result = renderLines(new LineSource([tokens]), RenderOptions.fromEditor(this._editor.editor).withSetWidth(false), decorations, line, true);
+			const result = renderLines(new LineSource([tokens]), RenderOptions.fromEditor(this._editor.editor).withSetWidth(false).withScrollBeyondLastColumn(0), decorations, line, true);
 			this._editor.getOption(EditorOption.fontInfo).read(reader); // update when font info changes
 
 			requiredWidth = Math.max(requiredWidth, result.minWidthInPx);
@@ -90,7 +90,7 @@ export class InlineEditsLineReplacementView extends Disposable implements IInlin
 			lines.push(line);
 		}
 
-		return { lines, requiredWidth: requiredWidth - 10 }; // TODO: Width is always too large, why?
+		return { lines, requiredWidth: requiredWidth };
 	});
 
 
@@ -153,7 +153,7 @@ export class InlineEditsLineReplacementView extends Disposable implements IInlin
 	});
 
 	private readonly _viewZoneInfo = derived<{ height: number; lineNumber: number } | undefined>(reader => {
-		const shouldShowViewZone = this._editor.getOption(EditorOption.inlineSuggest).map(o => o.edits.codeShifting).read(reader);
+		const shouldShowViewZone = this._editor.getOption(EditorOption.inlineSuggest).map(o => o.edits.allowCodeShifting === 'always').read(reader);
 		if (!shouldShowViewZone) {
 			return undefined;
 		}
@@ -197,7 +197,8 @@ export class InlineEditsLineReplacementView extends Disposable implements IInlin
 				l.style.position = 'relative';
 			});
 
-			const modifiedBorderColor = getModifiedBorderColor(this._host.tabAction).read(reader);
+			const modifiedBorderColor = getModifiedBorderColor(this._tabAction).read(reader);
+			const originalBorderColor = getOriginalBorderColor(this._tabAction).read(reader);
 
 			return [
 				n.div({
@@ -222,31 +223,46 @@ export class InlineEditsLineReplacementView extends Disposable implements IInlin
 						},
 					}),
 					n.div({
+						class: 'originalOverlayLineReplacement',
+						style: {
+							position: 'absolute',
+							...rectToProps(reader => layout.read(reader).background.translateX(-contentLeft)),
+							borderRadius: '4px',
+
+							border: getEditorBlendedColor(originalBorderColor, this._themeService).map(c => `1px solid ${c.toString()}`),
+							pointerEvents: 'none',
+							boxSizing: 'border-box',
+							background: asCssVariable(originalBackgroundColor),
+						}
+					}),
+					n.div({
+						class: 'modifiedOverlayLineReplacement',
 						style: {
 							position: 'absolute',
 							...rectToProps(reader => layout.read(reader).lowerBackground.translateX(-contentLeft)),
 							borderRadius: '4px',
 							background: asCssVariable(editorBackground),
 							boxShadow: `${asCssVariable(scrollbarShadow)} 0 6px 6px -6px`,
-							borderTop: `1px solid ${modifiedBorderColor}`,
+							border: `1px solid ${asCssVariable(modifiedBorderColor)}`,
+							boxSizing: 'border-box',
 							overflow: 'hidden',
 							cursor: 'pointer',
 							pointerEvents: 'auto',
 						},
-						onmouseup: (e) => this._onDidClick.fire(new StandardMouseEvent(getWindow(e), e)),
+						onmousedown: e => {
+							e.preventDefault(); // This prevents that the editor loses focus
+						},
+						onclick: (e) => this._onDidClick.fire(new StandardMouseEvent(getWindow(e), e)),
 					}, [
 						n.div({
 							style: {
-								position: 'absolute',
-								top: 0,
-								left: 0,
-								width: '100%',
-								height: '100%',
+								position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
 								background: asCssVariable(modifiedChangedLineBackgroundColor),
 							},
 						})
 					]),
 					n.div({
+						class: 'modifiedLinesLineReplacement',
 						style: {
 							position: 'absolute',
 							padding: '0px',
@@ -258,17 +274,6 @@ export class InlineEditsLineReplacementView extends Disposable implements IInlin
 							pointerEvents: 'none',
 						}
 					}, [...modifiedLineElements.lines]),
-					n.div({
-						style: {
-							position: 'absolute',
-							...rectToProps(reader => layout.read(reader).background.translateX(-contentLeft)),
-							borderRadius: '4px',
-
-							border: `1px solid ${modifiedBorderColor}`,
-							pointerEvents: 'none',
-							boxSizing: 'border-box',
-						}
-					}, []),
 				])
 			];
 		})
@@ -284,8 +289,9 @@ export class InlineEditsLineReplacementView extends Disposable implements IInlin
 			modifiedLines: string[];
 			replacements: Replacement[];
 		} | undefined>,
-		private readonly _host: IInlineEditsViewHost,
-		@ILanguageService private readonly _languageService: ILanguageService
+		private readonly _tabAction: IObservable<InlineEditTabAction>,
+		@ILanguageService private readonly _languageService: ILanguageService,
+		@IThemeService private readonly _themeService: IThemeService,
 	) {
 		super();
 
@@ -363,4 +369,24 @@ export class InlineEditsLineReplacementView extends Disposable implements IInlin
 			this._editor.editor.setScrollTop(this._editor.scrollTop.get() + viewZoneInfo.height);
 		}
 	}
+}
+
+function rangesToBubbleRanges(ranges: Range[]): Range[] {
+	const result: Range[] = [];
+	while (ranges.length) {
+		let range = ranges.shift()!;
+		if (range.startLineNumber !== range.endLineNumber) {
+			ranges.push(new Range(range.startLineNumber + 1, 1, range.endLineNumber, range.endColumn));
+			range = new Range(range.startLineNumber, range.startColumn, range.startLineNumber, Number.MAX_SAFE_INTEGER); // TODO: this is not correct
+		}
+
+		result.push(range);
+	}
+	return result;
+
+}
+
+export interface Replacement {
+	originalRange: Range;
+	modifiedRange: Range;
 }
